@@ -16,7 +16,7 @@ robots:
     #     topic_name3: 
     #       frequency: 1
     #       vars: ["acc.x", "acc.y"]
-    # reference_frame: "odom_cf231" # use a custom reference frame if no global coordinate system is available
+    reference_frame: "world" # use a custom reference frame if no global coordinate system is available
 
   cf5:
     enabled: false

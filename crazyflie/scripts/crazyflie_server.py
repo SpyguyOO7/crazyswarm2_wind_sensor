@@ -33,10 +33,10 @@ from motion_capture_tracking_interfaces.msg import NamedPoseArray
 from std_srvs.srv import Empty
 from std_msgs.msg import String
 from geometry_msgs.msg import Twist
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped, Vector3Stamped
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
-
+from cflib.crazyflie.platformservice import PlatformService
 import tf_transformations
 from tf2_ros import TransformBroadcaster
 
@@ -93,20 +93,24 @@ class CrazyflieServer(Node):
         self.default_log_type = {"pose": PoseStamped,
                                  "scan": LaserScan,
                                  "odom": Odometry,
-                                 "status": Status}
+                                 "status": Status,
+                                 "wind": Vector3Stamped}
         self.default_log_vars = {"pose": ['stateEstimate.x', 'stateEstimate.y', 'stateEstimate.z',
                                           'stabilizer.roll', 'stabilizer.pitch', 'stabilizer.yaw'],
                                  "scan": ['range.front', 'range.left', 'range.back', 'range.right'],
                                  "odom": ['stateEstimate.x', 'stateEstimate.y', 'stateEstimate.z',
                                           'stabilizer.yaw', 'stabilizer.roll', 'stabilizer.pitch',
-                                          'kalman.statePX', 'kalman.statePY', 'kalman.statePZ',
+                                          'stateEstimate.vx', 'stateEstimate.vy', 'stateEstimate.vz',
                                           'gyro.z', 'gyro.x', 'gyro.y'],
                                  "status": ['supervisor.info', 'pm.vbatMV', 'pm.state',
-                                          'radio.rssi']}
+                                          'radio.rssi'],
+                                 "wind": ['windSensor.flowX', 'windSensor.flowY', 'windSensor.flowZ']}
+
         self.default_log_fnc = {"pose": self._log_pose_data_callback,
                                 "scan": self._log_scan_data_callback,
                                 "odom": self._log_odom_data_callback,
-                                "status": self._log_status_data_callback}
+                                "status": self._log_status_data_callback,
+                                "wind": self._log_wind_data_callback}
 
         world_tf_name = "world"
         robot_yaml_version = 0
@@ -397,6 +401,8 @@ class CrazyflieServer(Node):
         for logvar in list_logvar:
             if prefix == "odom":
                 lg.add_variable(logvar, "FP16")
+            elif prefix == "wind":
+                lg.add_variable(logvar, "int16_t") # <-- Force int16_t for wind sensors
             else:
                 lg.add_variable(logvar)
 
@@ -449,6 +455,11 @@ class CrazyflieServer(Node):
          logs has been received of the Crazyflie
         """
         self.get_logger().info(f"[{self.cf_dict[link_uri]}] is connected!")
+        
+        self.get_logger().info(f"[{self.cf_dict[link_uri]}] Sending arming request...")
+        platform = PlatformService(self.swarm._cfs[link_uri].cf)
+        platform.send_arming_request(True)
+        
         self.swarm.connected_crazyflie_cnt += 1
 
         if self.swarm.connected_crazyflie_cnt == len(self.cf_dict) - 1:
@@ -661,9 +672,9 @@ class CrazyflieServer(Node):
         yaw = radians(data.get('stabilizer.yaw'))
         roll = radians(data.get('stabilizer.roll'))
         pitch = radians(data.get('stabilizer.pitch'))
-        vx = data.get('kalman.statePX')
-        vy = data.get('kalman.statePY')
-        vz = data.get('kalman.statePZ')
+        vx = data.get('stateEstimate.vx')
+        vy = data.get('stateEstimate.vy')
+        vz = data.get('stateEstimate.vz')
         yawrate = data.get('gyro.z')
         rollrate = data.get('gyro.x')
         pitchrate = data.get('gyro.y')
@@ -735,6 +746,34 @@ class CrazyflieServer(Node):
         except:
             self.get_logger().info("Could not publish status message, stopping status log")
             self.swarm._cfs[uri].logging["status_log_config"].stop()
+    
+    def _log_wind_data_callback(self, timestamp, data, logconf, uri):
+        """
+        Once wind sensor data is retrieved from the Crazyflie,
+        send out the ROS 2 topic for Wind as a Vector3Stamped.
+        """
+        # Extract and invert X/Y as dictated by hardware mounting/logic
+        bx = -float(data.get('windSensor.flowX', 0.0))
+        by = -float(data.get('windSensor.flowY', 0.0))
+        bz = float(data.get('windSensor.flowZ', 0.0))
+
+        # bx = 0.0
+        # by = 0.0 
+        # bz = 0.0
+        msg = Vector3Stamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        # Use the server's reference frame (usually 'world' or 'map')
+        msg.header.frame_id = self.swarm._cfs[uri].reference_frame 
+
+        msg.vector.x = bx
+        msg.vector.y = by
+        msg.vector.z = bz
+
+        try:
+            self.swarm._cfs[uri].logging["wind_publisher"].publish(msg)
+        except Exception as e:
+            self.get_logger().info(f"Could not publish wind message: {e}")
+            self.swarm._cfs[uri].logging["wind_log_config"].stop()
 
     def _log_custom_data_callback(self, timestamp, data, logconf, uri):
         """
